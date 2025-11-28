@@ -12,7 +12,8 @@ const initializeGenAI = (): GoogleGenAI => {
 
 export const sendMessageToGemini = async (
   history: Message[], 
-  newMessage: { text?: string, audio?: string }
+  newMessage: { text?: string, audio?: string },
+  persona?: { name: string; context: string }
 ): Promise<string> => {
   try {
     const ai = initializeGenAI();
@@ -20,12 +21,25 @@ export const sendMessageToGemini = async (
     // Map internal history format to Gemini Chat history format
     const model = 'gemini-2.5-flash';
 
-    const systemInstruction = `You are "Shadow", a secure communication assistant. 
+    let systemInstruction = `You are "Shadow", a secure communication assistant. 
     You prioritize privacy, security, and anonymity. 
     Your tone is professional, slightly cypherpunk, and concise.
     You help users with encryption, privacy advice, and general tasks.
     Do not mention you are an AI model developed by Google unless directly asked. 
     You are running in a local-first encrypted environment.`;
+
+    // If a persona is provided, we switch to Digital Twin mode
+    if (persona) {
+      systemInstruction = `You are roleplaying as a user named "${persona.name}". 
+      You are communicating over a secure, encrypted messaging app.
+      Your personality/context is defined by this note: "${persona.context}".
+      
+      Rules:
+      1. Stay in character completely. Do not break the fourth wall.
+      2. Keep responses relatively short, like a real instant message.
+      3. Use the tone described in the context.
+      4. If the context is empty, act as a friendly, privacy-conscious friend.`;
+    }
 
     const formattedHistory = history.map(h => {
       const parts: any[] = [];
@@ -33,13 +47,9 @@ export const sendMessageToGemini = async (
         parts.push({ text: h.content });
       }
       if (h.type === 'audio' && h.mediaData) {
-        // Send previous audio as inline data if needed, or just text context
-        // For history efficiency, we often just keep the text context if the model transcribed it,
-        // but since we don't have transcription here yet, we'll omit old audio blobs to save tokens/bandwidth
-        // unless strictly necessary. We'll rely on the text 'content' field being populated with a placeholder or transcript.
+        // We omit old audio blobs to save tokens unless strictly necessary
         if (h.content === '[Audio Message]') {
-             // If we really wanted to resend audio context, we would add inlineData here.
-             // parts.push({ inlineData: { mimeType: 'audio/webm', data: h.mediaData } });
+             // Placeholder for audio history logic
         }
       }
       return {
@@ -52,7 +62,7 @@ export const sendMessageToGemini = async (
       model,
       config: {
         systemInstruction,
-        temperature: 0.7,
+        temperature: persona ? 0.9 : 0.7, // Higher creativity for persona
       },
       history: formattedHistory
     });

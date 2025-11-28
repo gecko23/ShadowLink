@@ -7,6 +7,7 @@ export interface Message {
   timestamp: number;
   encrypted?: boolean; // Flag to indicate if we need to decrypt it locally
   expiresAt?: number; // Timestamp when message should be auto-deleted
+  conversationId?: string; // 'global' or contact.id
 }
 
 export interface StoredMessage {
@@ -20,6 +21,7 @@ export interface StoredMessage {
   ciphertextMedia?: string; // Base64 encrypted media
   ivMedia?: string; // Base64
   expiresAt?: number;
+  conversationId?: string;
 }
 
 export interface Contact {
@@ -39,12 +41,15 @@ export interface StoredContact {
 export interface UserProfile {
   id: string;
   nickname: string;
+  bio?: string; // Public bio / Persona context for Digital Twin
 }
 
 export interface StoredUserProfile {
   id: string;
   ciphertextNickname: string; // Base64
   ivNickname: string; // Base64
+  ciphertextBio?: string; // Base64
+  ivBio?: string; // Base64
 }
 
 export enum AppView {

@@ -4,13 +4,15 @@ import { ChatInterface } from './components/ChatInterface';
 import { CryptoTools } from './components/CryptoTools';
 import { Contacts } from './components/Contacts';
 import { Settings } from './components/Settings';
-import { MessageSquare, Shield, Settings as SettingsIcon, Users } from 'lucide-react';
-import { AppView } from './types';
+import { MessageSquare, Shield, Settings as SettingsIcon, Users, WifiOff } from 'lucide-react';
+import { AppView, Contact } from './types';
 import { initPrivacyShield } from './services/privacyShield';
 
 function App() {
   const [currentView, setCurrentView] = useState<AppView>(AppView.LOCK_SCREEN);
   const [cryptoKey, setCryptoKey] = useState<CryptoKey | null>(null);
+  const [activeContact, setActiveContact] = useState<Contact | null>(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   // Initialize systems on mount
   useEffect(() => {
@@ -21,10 +23,17 @@ function App() {
     if (window.Telegram?.WebApp) {
       window.Telegram.WebApp.ready();
       window.Telegram.WebApp.expand();
-      
-      // Optional: Set header color to match app
-      // window.Telegram.WebApp.setHeaderColor('#0a0a0a');
     }
+
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
   const handleUnlock = (key: CryptoKey) => {
@@ -35,7 +44,38 @@ function App() {
   const handleLock = () => {
     setCryptoKey(null);
     setCurrentView(AppView.LOCK_SCREEN);
+    setActiveContact(null);
   };
+
+  const handleChatStart = (contact: Contact) => {
+    setActiveContact(contact);
+    setCurrentView(AppView.CHAT);
+  };
+
+  const handleGlobalChat = () => {
+    setActiveContact(null);
+    setCurrentView(AppView.CHAT);
+  };
+
+  // Connection Guard
+  if (!isOnline && currentView !== AppView.LOCK_SCREEN && currentView !== AppView.SETTINGS) {
+     return (
+       <div className="flex flex-col items-center justify-center h-screen bg-black text-white p-6 text-center space-y-6">
+         <div className="w-20 h-20 bg-red-900/20 rounded-full flex items-center justify-center animate-pulse">
+           <WifiOff size={40} className="text-red-500" />
+         </div>
+         <div>
+           <h1 className="text-2xl font-mono font-bold text-red-500">CONNECTION LOST</h1>
+           <p className="text-zinc-500 mt-2 font-mono text-sm">Secure uplink required for operation.</p>
+         </div>
+         <div className="p-4 border border-red-900/30 rounded-lg bg-red-900/5 max-w-xs">
+            <p className="text-xs text-red-300 font-mono">
+              The application requires an active internet connection to maintain secure handshake protocols.
+            </p>
+         </div>
+       </div>
+     );
+  }
 
   // If locked, show lock screen
   if (currentView === AppView.LOCK_SCREEN || !cryptoKey) {
@@ -46,8 +86,8 @@ function App() {
     <div className="flex flex-col h-screen bg-black text-gray-200 overflow-hidden font-sans">
       {/* Main Content Area */}
       <main className="flex-1 overflow-hidden relative">
-        {currentView === AppView.CHAT && <ChatInterface cryptoKey={cryptoKey} />}
-        {currentView === AppView.CONTACTS && <Contacts cryptoKey={cryptoKey} />}
+        {currentView === AppView.CHAT && <ChatInterface cryptoKey={cryptoKey} activeContact={activeContact} />}
+        {currentView === AppView.CONTACTS && <Contacts cryptoKey={cryptoKey} onChatStart={handleChatStart} />}
         {currentView === AppView.TOOLS && <CryptoTools />}
         {currentView === AppView.SETTINGS && <Settings cryptoKey={cryptoKey} onLock={handleLock} />}
       </main>
@@ -56,7 +96,7 @@ function App() {
       <nav className="h-16 bg-surface border-t border-zinc-800 flex justify-around items-center px-2 pb-safe z-50">
         <NavButton 
           active={currentView === AppView.CHAT} 
-          onClick={() => setCurrentView(AppView.CHAT)}
+          onClick={handleGlobalChat}
           icon={<MessageSquare size={20} />}
           label="Chat"
         />
