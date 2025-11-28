@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Trash2, Shield, Wifi, WifiOff, Mic, Square, Play, Pause, Clock, Timer, Check } from 'lucide-react';
-import { Message, StoredMessage } from '../types';
-import { encryptMessage, decryptMessage, bufToBase64 } from '../services/cryptoUtils';
+import { Send, Trash2, Shield, Wifi, WifiOff, Mic, Clock, Timer, Check, User } from 'lucide-react';
+import { Message, StoredMessage, Contact } from '../types';
+import { encryptMessage, decryptMessage } from '../services/cryptoUtils';
 import { sendMessageToGemini } from '../services/geminiService';
 import { Button } from './Button';
 
 interface ChatInterfaceProps {
   cryptoKey: CryptoKey;
+  activeContact: Contact | null;
 }
 
 const TTL_OPTIONS = [
@@ -17,12 +18,14 @@ const TTL_OPTIONS = [
   { label: '24h', value: 24 * 60 * 60 * 1000 },
 ];
 
-export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey }) => {
+export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey, activeContact }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const conversationId = activeContact ? activeContact.id : 'global';
 
   // Auto-delete / Disappearing Messages State
   const [ttl, setTtl] = useState<number>(0);
@@ -35,66 +38,97 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey }) => {
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<number | null>(null);
 
-  // Load and decrypt messages on mount
+  // Load and decrypt messages on mount or when activeContact changes
   useEffect(() => {
-    const loadMessages = async () => {
-      const stored = localStorage.getItem('shadowlink_history');
-      if (stored) {
-        try {
-          const encryptedHistory: StoredMessage[] = JSON.parse(stored);
-          const now = Date.now();
-          
-          // Filter out expired messages during load
-          const validMessages = encryptedHistory.filter(m => !m.expiresAt || m.expiresAt > now);
-          
-          // If we filtered anything, update storage immediately
-          if (validMessages.length !== encryptedHistory.length) {
-             localStorage.setItem('shadowlink_history', JSON.stringify(validMessages));
-          }
-
-          const decryptedHistory = await Promise.all(
-            validMessages.map(async (m) => {
-              const content = await decryptMessage(m.ciphertext, m.iv, cryptoKey);
-              let mediaData = undefined;
-              
-              if (m.type === 'audio' && m.ciphertextMedia && m.ivMedia) {
-                try {
-                  mediaData = await decryptMessage(m.ciphertextMedia, m.ivMedia, cryptoKey);
-                } catch (err) {
-                  console.error("Failed to decrypt audio", err);
-                }
-              }
-
-              return {
-                id: m.id,
-                role: m.role,
-                timestamp: m.timestamp,
-                content: content,
-                type: m.type || 'text',
-                mediaData: mediaData,
-                encrypted: false,
-                expiresAt: m.expiresAt
-              } as Message;
-            })
-          );
-          setMessages(decryptedHistory);
-        } catch (e) {
-          console.error("Failed to load history", e);
-        }
-      } else {
-        // Initial Greeting
-        setMessages([{
-          id: 'init',
-          role: 'model',
-          content: 'Secure channel established. I am Shadow. Local storage is encrypted. How can I assist you?',
-          timestamp: Date.now(),
-          type: 'text'
-        }]);
-      }
-    };
     loadMessages();
+  }, [cryptoKey, activeContact]);
 
-    // Network status listeners
+  const loadMessages = async () => {
+    const stored = localStorage.getItem('shadowlink_history');
+    if (stored) {
+      try {
+        const encryptedHistory: StoredMessage[] = JSON.parse(stored);
+        const now = Date.now();
+        
+        // Filter out expired messages globally first
+        const validMessages = encryptedHistory.filter(m => !m.expiresAt || m.expiresAt > now);
+        
+        if (validMessages.length !== encryptedHistory.length) {
+             localStorage.setItem('shadowlink_history', JSON.stringify(validMessages));
+        }
+
+        const allDecryptedMessages = await Promise.all(
+          validMessages.map(async (m) => {
+            const content = await decryptMessage(m.ciphertext, m.iv, cryptoKey);
+            let mediaData = undefined;
+            
+            if (m.type === 'audio' && m.ciphertextMedia && m.ivMedia) {
+              try {
+                mediaData = await decryptMessage(m.ciphertextMedia, m.ivMedia, cryptoKey);
+              } catch (err) {
+                console.error("Failed to decrypt audio", err);
+              }
+            }
+
+            return {
+              id: m.id,
+              role: m.role,
+              timestamp: m.timestamp,
+              content: content,
+              type: m.type || 'text',
+              mediaData: mediaData,
+              encrypted: false,
+              expiresAt: m.expiresAt,
+              conversationId: m.conversationId || 'global'
+            } as Message;
+          })
+        );
+
+        // Filter for current conversation
+        const filteredMessages = allDecryptedMessages.filter(m => m.conversationId === conversationId);
+        
+        // If it's a new contact chat and empty, add greeting
+        if (filteredMessages.length === 0 && activeContact) {
+            setMessages([{
+                id: 'init-contact',
+                role: 'system',
+                content: `Secure channel established with ${activeContact.name}. Messages are locally encrypted.`,
+                timestamp: Date.now(),
+                type: 'text',
+                conversationId: conversationId
+            }]);
+        } else if (filteredMessages.length === 0 && !activeContact) {
+            setMessages([{
+                id: 'init-global',
+                role: 'model',
+                content: 'Secure channel established. I am Shadow. Local storage is encrypted. How can I assist you?',
+                timestamp: Date.now(),
+                type: 'text',
+                conversationId: 'global'
+            }]);
+        } else {
+            setMessages(filteredMessages);
+        }
+
+      } catch (e) {
+        console.error("Failed to load history", e);
+      }
+    } else {
+        // First run ever
+        if (!activeContact) {
+            setMessages([{
+            id: 'init',
+            role: 'model',
+            content: 'Secure channel established. I am Shadow. Local storage is encrypted. How can I assist you?',
+            timestamp: Date.now(),
+            type: 'text',
+            conversationId: 'global'
+            }]);
+        }
+    }
+  };
+
+  useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
@@ -103,143 +137,103 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey }) => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [cryptoKey]);
+  }, []);
 
-  // Expiration Checker Loop
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const now = Date.now();
-      setMessages(currentMessages => {
-        const hasExpired = currentMessages.some(m => m.expiresAt && m.expiresAt <= now);
-        if (hasExpired) {
-          const activeMessages = currentMessages.filter(m => !m.expiresAt || m.expiresAt > now);
-          // We need to update storage as well to reflect the deletion
-          // Note: saveToStorage is async and depends on cryptoKey, so we call it carefully or rely on the state update to trigger a save
-          // However, decrypting/re-encrypting inside an interval is heavy.
-          // Better approach: sync logic.
-          syncStorageAfterPrune(activeMessages);
-          return activeMessages;
-        }
-        return currentMessages;
-      });
-    }, 5000); // Check every 5 seconds
-
-    return () => clearInterval(interval);
-  }, [cryptoKey]);
-
-  // Helper to sync storage after auto-deletion without re-encrypting everything if possible
-  // Since we don't hold the encrypted versions in state, we have to re-encrypt or read-modify-write.
-  // Re-encrypting is safer for code simplicity here given the scale.
-  const syncStorageAfterPrune = (activeMessages: Message[]) => {
-    saveToStorage(activeMessages);
-  };
-
-  // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Save to local storage whenever messages change
-  // Note: This is computationally expensive for large chats. In a production app, we'd optimize this.
-  const saveToStorage = async (msgs: Message[]) => {
+  // Merge current messages with all other messages in storage and save
+  const saveToStorage = async (newCurrentMessages: Message[]) => {
     try {
-      const encryptedHistory: StoredMessage[] = await Promise.all(
-        msgs.map(async (m) => {
-          const { ciphertext, iv } = await encryptMessage(m.content, cryptoKey);
-          let ciphertextMedia = undefined;
-          let ivMedia = undefined;
+        // Load ALL existing messages first (raw)
+        const stored = localStorage.getItem('shadowlink_history');
+        let allEncrypted: StoredMessage[] = stored ? JSON.parse(stored) : [];
 
-          if (m.type === 'audio' && m.mediaData) {
-            const encryptedMedia = await encryptMessage(m.mediaData, cryptoKey);
-            ciphertextMedia = encryptedMedia.ciphertext;
-            ivMedia = encryptedMedia.iv;
-          }
+        // Remove old versions of messages for THIS conversation
+        allEncrypted = allEncrypted.filter(m => (m.conversationId || 'global') !== conversationId);
 
-          return {
-            id: m.id,
-            role: m.role,
-            timestamp: m.timestamp,
-            ciphertext,
-            iv,
-            type: m.type,
-            ciphertextMedia,
-            ivMedia,
-            salt: '', // Salt is derived from master password globally
-            expiresAt: m.expiresAt
-          };
-        })
-      );
-      localStorage.setItem('shadowlink_history', JSON.stringify(encryptedHistory));
+        // Encrypt new messages for THIS conversation
+        const newEncrypted: StoredMessage[] = await Promise.all(
+            newCurrentMessages.map(async (m) => {
+            const { ciphertext, iv } = await encryptMessage(m.content, cryptoKey);
+            let ciphertextMedia = undefined;
+            let ivMedia = undefined;
+
+            if (m.type === 'audio' && m.mediaData) {
+                const encryptedMedia = await encryptMessage(m.mediaData, cryptoKey);
+                ciphertextMedia = encryptedMedia.ciphertext;
+                ivMedia = encryptedMedia.iv;
+            }
+
+            return {
+                id: m.id,
+                role: m.role,
+                timestamp: m.timestamp,
+                ciphertext,
+                iv,
+                type: m.type,
+                ciphertextMedia,
+                ivMedia,
+                salt: '',
+                expiresAt: m.expiresAt,
+                conversationId: conversationId
+            };
+            })
+        );
+
+        // Combine and save
+        const finalStorage = [...allEncrypted, ...newEncrypted];
+        localStorage.setItem('shadowlink_history', JSON.stringify(finalStorage));
+
     } catch (e) {
       console.error("Save failed", e);
     }
   };
 
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-        reader.onloadend = () => {
-          const base64String = (reader.result as string).split(',')[1];
-          handleSendAudio(base64String);
-        };
-        // Stop all tracks
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      mediaRecorder.start();
-      setIsRecording(true);
-      setRecordingTime(0);
-      timerIntervalRef.current = window.setInterval(() => {
-        setRecordingTime(prev => prev + 1);
-      }, 1000);
-
-    } catch (err) {
-      console.error("Error accessing microphone:", err);
-      alert("Microphone access denied or unavailable.");
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
-    }
-  };
-
-  const cancelRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      audioChunksRef.current = [];
-      mediaRecorderRef.current.onstop = null;
-      
-      setIsRecording(false);
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
-    }
-  };
-
   const calculateExpiresAt = () => {
     return ttl > 0 ? Date.now() + ttl : undefined;
+  };
+
+  const handleSendResponse = async (userMsg: Message, currentHistory: Message[]) => {
+      setIsLoading(true);
+      try {
+        let responseText = '';
+        const inputPayload = userMsg.type === 'audio' && userMsg.mediaData 
+            ? { audio: userMsg.mediaData } 
+            : { text: userMsg.content };
+
+        if (activeContact) {
+            // "Digital Twin" Simulation Mode
+            // We pass the contact's name and note as the persona
+            responseText = await sendMessageToGemini(
+                currentHistory, 
+                inputPayload,
+                { name: activeContact.name, context: activeContact.note }
+            );
+        } else {
+            // Standard Shadow AI
+            responseText = await sendMessageToGemini(currentHistory, inputPayload);
+        }
+
+        const botMsg: Message = {
+            id: (Date.now() + 1).toString(),
+            role: 'model',
+            content: responseText,
+            type: 'text',
+            timestamp: Date.now(),
+            expiresAt: calculateExpiresAt(),
+            conversationId: conversationId
+        };
+        
+        const finalHistory = [...currentHistory, botMsg];
+        setMessages(finalHistory);
+        saveToStorage(finalHistory);
+      } catch (e) {
+          console.error(e);
+      } finally {
+          setIsLoading(false);
+      }
   };
 
   const handleSendAudio = async (base64Audio: string) => {
@@ -250,35 +244,15 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey }) => {
       type: 'audio',
       mediaData: base64Audio,
       timestamp: Date.now(),
-      expiresAt: calculateExpiresAt()
+      expiresAt: calculateExpiresAt(),
+      conversationId: conversationId
     };
 
     const newHistory = [...messages, userMsg];
     setMessages(newHistory);
-    setIsLoading(true);
-
     saveToStorage(newHistory);
-
-    try {
-      const responseText = await sendMessageToGemini(newHistory, { audio: base64Audio });
-      
-      const botMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        content: responseText,
-        type: 'text',
-        timestamp: Date.now(),
-        expiresAt: calculateExpiresAt() // Bot replies also inherit the TTL
-      };
-      
-      const finalHistory = [...newHistory, botMsg];
-      setMessages(finalHistory);
-      saveToStorage(finalHistory);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsLoading(false);
-    }
+    
+    handleSendResponse(userMsg, newHistory);
   };
 
   const handleSendText = async () => {
@@ -290,42 +264,28 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey }) => {
       content: inputText,
       type: 'text',
       timestamp: Date.now(),
-      expiresAt: calculateExpiresAt()
+      expiresAt: calculateExpiresAt(),
+      conversationId: conversationId
     };
 
     const newHistory = [...messages, userMsg];
     setMessages(newHistory);
     setInputText('');
-    setIsLoading(true);
-
     saveToStorage(newHistory);
 
-    try {
-      const responseText = await sendMessageToGemini(newHistory, { text: userMsg.content });
-      
-      const botMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        content: responseText,
-        type: 'text',
-        timestamp: Date.now(),
-        expiresAt: calculateExpiresAt()
-      };
-      
-      const finalHistory = [...newHistory, botMsg];
-      setMessages(finalHistory);
-      saveToStorage(finalHistory);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsLoading(false);
-    }
+    handleSendResponse(userMsg, newHistory);
   };
 
   const handleClear = () => {
-    if (window.confirm("Clear chat history? This cannot be undone.")) {
+    if (window.confirm("Clear this conversation history?")) {
       setMessages([]);
-      localStorage.removeItem('shadowlink_history');
+      // Load storage, filter out this conversation, save back
+      const stored = localStorage.getItem('shadowlink_history');
+      if (stored) {
+          const all: StoredMessage[] = JSON.parse(stored);
+          const kept = all.filter(m => (m.conversationId || 'global') !== conversationId);
+          localStorage.setItem('shadowlink_history', JSON.stringify(kept));
+      }
     }
   };
 
@@ -335,13 +295,79 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey }) => {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Recording Logic (same as before)
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+      };
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.readAsDataURL(audioBlob);
+        reader.onloadend = () => {
+          const base64String = (reader.result as string).split(',')[1];
+          handleSendAudio(base64String);
+        };
+        stream.getTracks().forEach(track => track.stop());
+      };
+      mediaRecorder.start();
+      setIsRecording(true);
+      setRecordingTime(0);
+      timerIntervalRef.current = window.setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+    } catch (err) {
+      alert("Microphone access denied.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      if (timerIntervalRef.current) { clearInterval(timerIntervalRef.current); timerIntervalRef.current = null; }
+    }
+  };
+
+  const cancelRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      audioChunksRef.current = [];
+      mediaRecorderRef.current.onstop = null;
+      setIsRecording(false);
+      if (timerIntervalRef.current) { clearInterval(timerIntervalRef.current); timerIntervalRef.current = null; }
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-background relative">
       {/* Header */}
       <div className="h-14 border-b border-zinc-800 flex items-center justify-between px-4 bg-surface/50 backdrop-blur-md sticky top-0 z-10">
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-primary animate-pulse"></div>
-          <span className="font-mono font-bold text-sm tracking-wider">SHADOWLINK</span>
+          {activeContact ? (
+              <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-primary">
+                    <User size={14}/>
+                  </div>
+                  <div>
+                    <span className="font-bold text-sm block leading-tight">{activeContact.name}</span>
+                    <span className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-primary/50"></span>
+                        ENCRYPTED • DIGITAL TWIN
+                    </span>
+                  </div>
+              </div>
+          ) : (
+            <>
+                <div className="w-2 h-2 rounded-full bg-primary animate-pulse"></div>
+                <span className="font-mono font-bold text-sm tracking-wider">SHADOWLINK AI</span>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-3">
            {/* Auto Delete Menu */}
@@ -390,10 +416,19 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey }) => {
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((msg) => {
           const isUser = msg.role === 'user';
-          // Calculate remaining time for visual indication if message has TTL
-          // Only show if it's gonna expire soon or is ephemeral
+          const isSystem = msg.role === 'system';
           const isEphemeral = !!msg.expiresAt;
           
+          if (isSystem) {
+              return (
+                  <div key={msg.id} className="flex justify-center my-4">
+                      <span className="text-[10px] text-zinc-600 font-mono bg-zinc-900/50 px-3 py-1 rounded-full border border-zinc-800">
+                          {msg.content}
+                      </span>
+                  </div>
+              )
+          }
+
           return (
             <div key={msg.id} className={`flex w-full ${isUser ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[85%] rounded-2xl p-4 relative group ${
@@ -450,18 +485,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey }) => {
                  <span className="font-mono text-sm font-bold">{formatTime(recordingTime)}</span>
                </div>
                <div className="flex items-center gap-2">
-                 <button 
-                    onClick={cancelRecording}
-                    className="p-1 text-zinc-400 hover:text-white"
-                  >
-                   Cancel
-                 </button>
-                 <button 
-                    onClick={stopRecording}
-                    className="p-1.5 bg-red-600 rounded-lg text-white hover:bg-red-500"
-                  >
-                   <Send size={16} />
-                 </button>
+                 <button onClick={cancelRecording} className="p-1 text-zinc-400 hover:text-white">Cancel</button>
+                 <button onClick={stopRecording} className="p-1.5 bg-red-600 rounded-lg text-white hover:bg-red-500"><Send size={16} /></button>
                </div>
              </div>
           ) : (
@@ -476,36 +501,18 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ cryptoKey }) => {
               <input
                 type="text"
                 className="flex-1 bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary font-sans transition-all"
-                placeholder="Type encrypted message..."
+                placeholder={activeContact ? `Message ${activeContact.name}...` : "Type encrypted message..."}
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
                 disabled={isLoading}
               />
-              <Button 
-                onClick={handleSendText} 
-                disabled={!inputText.trim() || isLoading}
-                className="!px-4 !py-0 !rounded-xl"
-              >
+              <Button onClick={handleSendText} disabled={!inputText.trim() || isLoading} className="!px-4 !py-0 !rounded-xl">
                 <Send size={18} />
               </Button>
             </>
           )}
         </div>
-        {!isRecording && (
-          <div className="text-center mt-2 flex justify-center items-center gap-2">
-            <p className="text-[10px] text-zinc-600 font-mono">
-              <Shield size={10} className="inline mr-1"/>
-              End-to-End Encryption
-            </p>
-            {ttl > 0 && (
-               <p className="text-[10px] text-accent font-mono animate-pulse">
-                 <Timer size={10} className="inline mr-1"/>
-                 Disappearing Messages On
-               </p>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );

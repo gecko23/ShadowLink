@@ -2,6 +2,7 @@
   "name": "ShadowLink",
   "description": "A privacy-focused secure messaging environment powered by local encryption and AI. Features AES-256 encryption tools and a secure, locally-encrypted AI chat assistant.",
   "requestFramePermissions": [
-    "microphone"
+    "microphone",
+    "camera"
   ]
 }

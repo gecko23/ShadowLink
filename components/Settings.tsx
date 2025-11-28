@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Shield, Lock, Save, Copy, Check, Fingerprint, User, QrCode as QrIcon, X, Globe, Eye, EyeOff, Radio, Download, Upload, HardDrive } from 'lucide-react';
+import { Shield, Lock, Save, Copy, Check, Fingerprint, User, QrCode as QrIcon, X, Globe, Eye, EyeOff, Radio, Download, Upload, HardDrive, FileText, Share2, Cloud, CloudRain, LogIn } from 'lucide-react';
 import { Button } from './Button';
 import { Input } from './Input';
 import { UserProfile, StoredUserProfile } from '../types';
 import { encryptMessage, decryptMessage } from '../services/cryptoUtils';
 import { enableWebRTCShield, disableWebRTCShield, getWebRTCShieldStatus } from '../services/privacyShield';
+import { signInToCloud, syncUpToCloud, syncDownFromCloud, getCurrentUser } from '../services/firebaseService';
 import QRCode from 'qrcode';
 
 interface SettingsProps {
@@ -13,7 +14,7 @@ interface SettingsProps {
 }
 
 export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
-  const [profile, setProfile] = useState<UserProfile>({ id: '', nickname: '' });
+  const [profile, setProfile] = useState<UserProfile>({ id: '', nickname: '', bio: '' });
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -26,6 +27,10 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
   const [torMode, setTorMode] = useState(false);
   const [webrtcShield, setWebrtcShield] = useState(getWebRTCShieldStatus());
 
+  // Cloud State
+  const [cloudUser, setCloudUser] = useState<any>(null);
+  const [isCloudLoading, setIsCloudLoading] = useState(false);
+
   // Backup file input ref
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -35,13 +40,15 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
     if (navigator.userAgent.includes('Tor')) {
       setTorMode(true);
     }
+    const user = getCurrentUser();
+    if (user) setCloudUser(user);
   }, [cryptoKey]);
 
   useEffect(() => {
     if (showQr && profile.id) {
       generateQr();
     }
-  }, [showQr, profile.id]);
+  }, [showQr, profile.id, profile.nickname, profile.bio]);
 
   // Handle WebRTC Shield Toggle
   const toggleWebRTC = () => {
@@ -71,16 +78,21 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
       try {
         const encryptedProfile: StoredUserProfile = JSON.parse(stored);
         let nickname = '';
+        let bio = '';
         try {
           nickname = await decryptMessage(encryptedProfile.ciphertextNickname, encryptedProfile.ivNickname, cryptoKey);
+          if (encryptedProfile.ciphertextBio && encryptedProfile.ivBio) {
+            bio = await decryptMessage(encryptedProfile.ciphertextBio, encryptedProfile.ivBio, cryptoKey);
+          }
         } catch (e) {
-          console.error("Failed to decrypt nickname", e);
+          console.error("Failed to decrypt profile", e);
           nickname = '[Decryption Failed]';
         }
         
         setProfile({
           id: encryptedProfile.id,
-          nickname: nickname
+          nickname: nickname,
+          bio: bio
         });
       } catch (e) {
         console.error("Failed to parse profile", e);
@@ -88,7 +100,8 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
     } else {
       setProfile({
         id: generateId(),
-        nickname: ''
+        nickname: '',
+        bio: ''
       });
     }
     setIsLoading(false);
@@ -96,7 +109,14 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
 
   const generateQr = async () => {
     try {
-      const url = await QRCode.toDataURL(profile.id, {
+      // Create a JSON payload for the QR code
+      const payload = JSON.stringify({
+        id: profile.id,
+        name: profile.nickname,
+        bio: profile.bio || ''
+      });
+
+      const url = await QRCode.toDataURL(payload, {
         width: 300,
         margin: 2,
         color: {
@@ -115,16 +135,20 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
     setIsSaving(true);
     
     try {
-      const { ciphertext, iv } = await encryptMessage(profile.nickname, cryptoKey);
+      const encryptedName = await encryptMessage(profile.nickname, cryptoKey);
+      const encryptedBio = await encryptMessage(profile.bio || '', cryptoKey);
       
       const storedProfile: StoredUserProfile = {
         id: profile.id,
-        ciphertextNickname: ciphertext,
-        ivNickname: iv
+        ciphertextNickname: encryptedName.ciphertext,
+        ivNickname: encryptedName.iv,
+        ciphertextBio: encryptedBio.ciphertext,
+        ivBio: encryptedBio.iv
       };
 
       localStorage.setItem('shadowlink_profile', JSON.stringify(storedProfile));
       await new Promise(r => setTimeout(r, 500));
+      if (showQr) generateQr(); // Regenerate QR if open
     } catch (e) {
       console.error("Failed to save profile", e);
     } finally {
@@ -156,6 +180,26 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
     navigator.clipboard.writeText(profile.id);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleShare = async () => {
+    const shareData = {
+      title: 'ShadowLink',
+      text: 'Join me on ShadowLink - The secure, encrypted messaging vault.',
+      url: window.location.href
+    };
+
+    if (navigator.share) {
+      try {
+        await navigator.share(shareData);
+      } catch (e) {
+        console.log('Share dismissed');
+      }
+    } else {
+      // Fallback
+      navigator.clipboard.writeText(window.location.href);
+      alert("Application link copied to clipboard.");
+    }
   };
 
   const handleExportBackup = () => {
@@ -230,6 +274,47 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  // Firebase Handlers
+  const handleCloudLogin = async () => {
+    setIsCloudLoading(true);
+    try {
+      const user = await signInToCloud();
+      setCloudUser(user);
+    } catch (e) {
+      alert("Connection Failed: Check Firebase Config");
+    } finally {
+      setIsCloudLoading(false);
+    }
+  };
+
+  const handleCloudSync = async () => {
+    if (!cloudUser || !profile.id) return;
+    setIsCloudLoading(true);
+    try {
+      await syncUpToCloud(profile.id);
+      alert("Encrypted Vault Synced to Cloud Successfully.");
+    } catch (e) {
+      alert("Sync Failed. See console.");
+    } finally {
+      setIsCloudLoading(false);
+    }
+  };
+
+  const handleCloudRestore = async () => {
+    if (!cloudUser || !profile.id) return;
+    if (!window.confirm("Restore from cloud? This will overwrite local data.")) return;
+    setIsCloudLoading(true);
+    try {
+      await syncDownFromCloud(profile.id);
+      alert("Restore Complete. Reloading...");
+      window.location.reload();
+    } catch (e) {
+      alert("Restore Failed. No backup found.");
+    } finally {
+      setIsCloudLoading(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full text-primary">
@@ -250,6 +335,92 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
 
       <div className="p-6 space-y-8 max-w-lg mx-auto w-full pb-24">
         
+        {/* Profile Section */}
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Fingerprint className="text-secondary" size={20} />
+            <h2 className="text-sm font-bold font-mono text-gray-400 uppercase">My Identity</h2>
+          </div>
+          
+          <div className="bg-surface border border-zinc-800 p-5 rounded-xl space-y-5">
+             <div className="space-y-2">
+                <label className="text-xs text-gray-500 font-mono uppercase">Unique ID (Public)</label>
+                <div className="flex gap-2">
+                  <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg p-3 font-mono text-xs text-zinc-400 break-all select-all">
+                    {profile.id}
+                  </div>
+                  <button 
+                    onClick={copyToClipboard}
+                    className="p-3 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-gray-400 transition-colors"
+                  >
+                    {copied ? <Check size={16} className="text-green-500" /> : <Copy size={16} />}
+                  </button>
+                </div>
+             </div>
+
+             <div>
+                <Button 
+                  type="button" 
+                  onClick={() => setShowQr(!showQr)} 
+                  variant="secondary" 
+                  className="w-full text-xs py-2"
+                >
+                  {showQr ? <><X size={14} /> Hide QR Code</> : <><QrIcon size={14} /> Show ID QR Code</>}
+                </Button>
+                
+                {showQr && (
+                  <div className="mt-4 flex flex-col items-center justify-center p-4 bg-zinc-900 rounded-xl border border-zinc-800 animate-in fade-in zoom-in duration-300">
+                    {qrCodeUrl ? (
+                      <img src={qrCodeUrl} alt="User ID QR Code" className="w-48 h-48 rounded-lg shadow-[0_0_20px_rgba(0,220,130,0.1)]" />
+                    ) : (
+                      <div className="w-48 h-48 flex items-center justify-center text-zinc-600">
+                        <span className="animate-pulse">Generating...</span>
+                      </div>
+                    )}
+                    <p className="mt-3 text-[10px] text-zinc-500 font-mono uppercase tracking-wider">Scan to add contact</p>
+                  </div>
+                )}
+             </div>
+
+             <div className="space-y-2 pt-2 border-t border-zinc-800/50">
+               <Input 
+                 label="Nickname (Encrypted)"
+                 placeholder="Enter alias..."
+                 value={profile.nickname}
+                 onChange={(e) => setProfile(prev => ({ ...prev, nickname: e.target.value }))}
+                 icon={<User size={16} />}
+               />
+             </div>
+
+             <div className="space-y-2">
+               <label className="text-xs text-gray-500 font-mono uppercase">Digital Twin Persona (Bio)</label>
+               <div className="relative group">
+                 <div className="absolute left-3 top-3 text-gray-500 group-focus-within:text-primary transition-colors">
+                   <FileText size={16} />
+                 </div>
+                 <textarea
+                   value={profile.bio}
+                   onChange={(e) => setProfile(prev => ({ ...prev, bio: e.target.value }))}
+                   placeholder="Describe how your AI Digital Twin should behave (e.g., 'Sarcastic hacker who loves pizza'). This is shared via QR code."
+                   className="w-full bg-surface border border-zinc-800 rounded-lg py-3 pl-10 pr-4 text-gray-100 placeholder-gray-600 focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/50 transition-all font-mono text-sm min-h-[100px] resize-none"
+                 />
+               </div>
+               <p className="text-[10px] text-zinc-600">
+                 * This info is embedded in your QR code. When friends scan it, their local AI will use this to simulate your chat persona.
+               </p>
+             </div>
+
+             <Button 
+               onClick={handleSave} 
+               isLoading={isSaving} 
+               className="w-full"
+               variant="primary"
+             >
+               <Save size={16} /> Update Identity
+             </Button>
+          </div>
+        </div>
+
         {/* Network Anonymity Section */}
         <div className="space-y-4">
           <div className="flex items-center gap-2 mb-2">
@@ -335,71 +506,57 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
           </div>
         </div>
 
-        {/* Profile Section */}
+        {/* Cloud Sync Section - NEW */}
         <div className="space-y-4">
           <div className="flex items-center gap-2 mb-2">
-            <Fingerprint className="text-secondary" size={20} />
-            <h2 className="text-sm font-bold font-mono text-gray-400 uppercase">My Identity</h2>
+            <Cloud className="text-primary" size={20} />
+            <h2 className="text-sm font-bold font-mono text-gray-400 uppercase">Encrypted Cloud Uplink</h2>
           </div>
-          
-          <div className="bg-surface border border-zinc-800 p-5 rounded-xl space-y-5">
-             <div className="space-y-2">
-                <label className="text-xs text-gray-500 font-mono uppercase">Unique ID (Public)</label>
-                <div className="flex gap-2">
-                  <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg p-3 font-mono text-xs text-zinc-400 break-all select-all">
-                    {profile.id}
-                  </div>
-                  <button 
-                    onClick={copyToClipboard}
-                    className="p-3 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-gray-400 transition-colors"
-                  >
-                    {copied ? <Check size={16} className="text-green-500" /> : <Copy size={16} />}
-                  </button>
-                </div>
-             </div>
 
-             <div>
-                <Button 
-                  type="button" 
-                  onClick={() => setShowQr(!showQr)} 
-                  variant="secondary" 
-                  className="w-full text-xs py-2"
-                >
-                  {showQr ? <><X size={14} /> Hide QR Code</> : <><QrIcon size={14} /> Show ID QR Code</>}
-                </Button>
-                
-                {showQr && (
-                  <div className="mt-4 flex flex-col items-center justify-center p-4 bg-zinc-900 rounded-xl border border-zinc-800 animate-in fade-in zoom-in duration-300">
-                    {qrCodeUrl ? (
-                      <img src={qrCodeUrl} alt="User ID QR Code" className="w-48 h-48 rounded-lg shadow-[0_0_20px_rgba(0,220,130,0.1)]" />
-                    ) : (
-                      <div className="w-48 h-48 flex items-center justify-center text-zinc-600">
-                        <span className="animate-pulse">Generating...</span>
-                      </div>
-                    )}
-                    <p className="mt-3 text-[10px] text-zinc-500 font-mono uppercase tracking-wider">Scan to add contact</p>
-                  </div>
-                )}
-             </div>
-
-             <div className="space-y-2 pt-2 border-t border-zinc-800/50">
-               <Input 
-                 label="Nickname (Encrypted)"
-                 placeholder="Enter alias..."
-                 value={profile.nickname}
-                 onChange={(e) => setProfile(prev => ({ ...prev, nickname: e.target.value }))}
-                 icon={<User size={16} />}
-               />
-             </div>
-
-             <Button 
-               onClick={handleSave} 
-               isLoading={isSaving} 
-               className="w-full"
-               variant="primary"
-             >
-               <Save size={16} /> Update Profile
-             </Button>
+          <div className="bg-surface border border-zinc-800 p-5 rounded-xl space-y-4">
+             {!cloudUser ? (
+               <div className="text-center space-y-3">
+                 <p className="text-xs text-zinc-500 font-mono">
+                   Connect to Firebase Cloud to sync your encrypted vault across devices.
+                 </p>
+                 <Button 
+                   onClick={handleCloudLogin} 
+                   isLoading={isCloudLoading}
+                   variant="secondary" 
+                   className="w-full"
+                 >
+                   <LogIn size={16} /> Establish Uplink
+                 </Button>
+               </div>
+             ) : (
+               <div className="space-y-3">
+                 <div className="flex items-center justify-between bg-zinc-900 p-2 rounded text-xs font-mono text-green-500">
+                    <span className="flex items-center gap-2"><div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div> CONNECTED</span>
+                    <span className="opacity-50">UID: {cloudUser.uid.substring(0,6)}...</span>
+                 </div>
+                 <div className="flex gap-3">
+                    <Button 
+                      onClick={handleCloudSync}
+                      isLoading={isCloudLoading}
+                      variant="primary"
+                      className="flex-1 text-xs"
+                    >
+                      <Upload size={14} /> Upload Vault
+                    </Button>
+                    <Button 
+                      onClick={handleCloudRestore}
+                      isLoading={isCloudLoading}
+                      variant="secondary"
+                      className="flex-1 text-xs"
+                    >
+                      <Download size={14} /> Restore Vault
+                    </Button>
+                 </div>
+                 <p className="text-[10px] text-zinc-600 text-center font-mono">
+                   * Data is encrypted locally before upload. Cloud provider cannot read contents.
+                 </p>
+               </div>
+             )}
           </div>
         </div>
 
@@ -407,7 +564,7 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
         <div className="space-y-4">
           <div className="flex items-center gap-2 mb-2">
             <HardDrive className="text-gray-400" size={20} />
-            <h2 className="text-sm font-bold font-mono text-gray-400 uppercase">Data Backup & Recovery</h2>
+            <h2 className="text-sm font-bold font-mono text-gray-400 uppercase">Local Backup</h2>
           </div>
 
           <div className="bg-surface border border-zinc-800 p-5 rounded-xl space-y-4">
@@ -417,7 +574,7 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
                   variant="secondary"
                   className="flex-1 text-xs"
                >
-                 <Download size={14} /> Export Identity
+                 <Download size={14} /> Export File
                </Button>
                
                <div className="flex-1 relative">
@@ -433,13 +590,31 @@ export const Settings: React.FC<SettingsProps> = ({ cryptoKey, onLock }) => {
                     variant="secondary"
                     className="w-full text-xs"
                  >
-                   <Upload size={14} /> Restore Backup
+                   <Upload size={14} /> Import File
                  </Button>
                </div>
              </div>
-             <p className="text-[10px] text-zinc-600 text-center font-mono">
-               Note: Backups contain your encryption salt. You will still need your password to unlock the restored session.
+          </div>
+        </div>
+
+        {/* Share Section */}
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Share2 className="text-primary" size={20} />
+            <h2 className="text-sm font-bold font-mono text-gray-400 uppercase">Share Access</h2>
+          </div>
+
+          <div className="bg-surface border border-zinc-800 p-5 rounded-xl space-y-3">
+             <p className="text-xs text-zinc-500 font-mono">
+               Share the application link securely with trusted contacts.
              </p>
+             <Button 
+              onClick={handleShare}
+              variant="secondary"
+              className="w-full"
+             >
+               <Share2 size={16} /> Share Application
+             </Button>
           </div>
         </div>
 
